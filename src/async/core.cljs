@@ -1,5 +1,5 @@
 (ns async.core
-  (:refer-clojure :exclude [map reduce]))
+  (:refer-clojure :exclude [map reduce some filter]))
 
 (defn- wrap-err
   [f cb-atom]
@@ -36,14 +36,6 @@
                           (@callback nil))))]
        (iterate coll))))
 
-;; (defn each-limit ...)
-
-(defn- do-parallel [f]
-  #(apply f (conj %& each)))
-
-(defn- do-series [f]
-  #(apply f (conj %& each-series)))
-
 (defn- indexed-map->seq
   "Converts a map of the form {index val} into a seq where
   index corresponds to the index of the value in the seq.
@@ -67,8 +59,8 @@
              (fn [err]
                (callback err (indexed-map->seq @results))))))
 
-(def map (do-parallel async-map))
-(def map-series (do-series async-map))
+(def map (partial async-map each))
+(def map-series (partial async-map each-series))
 
 (defn reduce [coll memo iterator callback]
   (let [memo (atom memo)]
@@ -88,15 +80,29 @@
 
 (def foldr reduce-right)
 
-;; (defn -filter ...)
-;; (def filter (do-parallel -filter))
-;; (def filter-series (do-series -filter))
-;; (def select filter)
-;; (def select-series filter-series)
+(defn- filter-on [pred-fn]
+  (fn [each-fn coll iterator callback]
+    (let [results (atom [])
+          coll (map-indexed #(identity %&) coll)]
+      (each-fn coll
+               (fn [indexed-val callback]
+                 (iterator (second indexed-val)
+                           (fn [v]
+                             (when (pred-fn v)
+                               (swap! results conj indexed-val))
+                             (callback))))
+               (fn [err]
+                 (callback (clojure.core/map second (sort-by first @results))))))))
 
-;; (defn -reject ...)
-;; (def reject (do-parallel -reject))
-;; (def reject-series (do-series -reject))
+(def -filter (filter-on true?))
+(def filter (partial -filter each))
+(def filter-series (partial -filter each-series))
+(def select filter)
+(def select-series filter-series)
+
+(def -reject (filter-on false?))
+(def reject (partial -reject each))
+(def reject-series (partial -reject each-series))
 
 (defn- -detect [each-fn coll iterator main-cb]
   (let [main-cb (atom main-cb)]
@@ -110,5 +116,21 @@
              (fn [err]
                (@main-cb nil)))))
 
-(def detect (do-parallel -detect))
-(def detect-series (do-series -detect))
+(def detect (partial -detect each))
+(def detect-series (partial -detect each-series))
+
+(defn- some-if [pred]
+  (fn [coll iterator main-cb]
+    (let [main-cb (atom main-cb)]
+      (each coll
+            (fn [x callback]
+              (iterator x (fn [v]
+                            (when (pred v)
+                              (@main-cb (pred true))
+                              (reset! main-cb (fn [_])))
+                            (callback))))
+            (fn [err]
+              (@main-cb (pred false)))))))
+
+(def some (some-if identity))
+(def every (some-if not))
